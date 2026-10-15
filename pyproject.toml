@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "image-codec"
+version = "0.0.0"
+description = "Experimental lossless image compression format"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "pillow>=11.0",
+]
+
+[project.optional-dependencies]
+# Reference codecs (PNG, WebP, AVIF, JPEG XL, QOI, ...) for size/speed comparisons.
+bench = [
+    "imagecodecs>=2024.1.1",
+    "matplotlib>=3.8",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/image_codec"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "NPY"]

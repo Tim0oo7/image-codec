@@ -1,0 +1,29 @@
+# Local-only files in the repo root (personal scripts, photos, papers)
+/*.py
+/*.pdf
+/*.jpg
+/*.jpeg
+/*.png
+
+# Benchmark corpora and encoder output (download/generate locally)
+corpus/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
