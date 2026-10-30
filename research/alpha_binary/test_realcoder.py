@@ -28,3 +28,12 @@ def test_round_trip_and_size():
     assert np.array_equal(realcoder.decode(bits, m.size, data), m.ravel())
     ideal = ctw_bits(m.ravel(), bits, 12, realcoder.ALPHA) / 8
     assert ideal <= len(data) <= ideal + 4
+
+
+def test_mixed_round_trip():
+    m = sample()
+    x = m.ravel()
+    pa = realcoder.probabilities(neighbour_bits(m, 12), x)
+    pb = realcoder.probabilities(neighbour_bits(m, 4), x)
+    data = realcoder.encode_mixed(x, pa, pb)
+    assert np.array_equal(realcoder.decode_mixed(data, x.size, pa, pb), x)

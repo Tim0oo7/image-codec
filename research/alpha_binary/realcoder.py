@@ -65,6 +65,7 @@ def _code(bits, x, table_bits, alpha, decode, data):
             pos += 1
             xv = np.uint32((xv << np.uint32(8)) | np.uint32(b))
     decoded = np.zeros(n, np.uint8)
+    probs = np.zeros(n, np.float64)
     path = np.zeros(depth + 1, np.int64)
     prefix = np.zeros(depth + 1, np.int64)
     sib = np.zeros(depth + 1, np.int64)
@@ -94,6 +95,7 @@ def _code(bits, x, table_bits, alpha, decode, data):
             else:
                 w = 1.0 / (1.0 + math.exp(t))
             pw1[d] = w * pe1 + (1.0 - w) * pw1[d + 1]
+        probs[i] = pw1[0]
         q = np.int64(pw1[0] * 65536.0 + 0.5)
         q = min(max(q, 1), 65535)
         # arithmetic coding of the bit
@@ -150,16 +152,154 @@ def _code(bits, x, table_bits, alpha, decode, data):
                     out[nout] = np.uint8((v >> np.uint64(24 - 8 * j)) & np.uint64(255))
                     nout += 1
                 break
-    return out[:nout], decoded
+    return out[:nout], decoded, probs
 
 
 def encode(bits, x, table_bits=TABLE_BITS, alpha=ALPHA):
     b = np.ascontiguousarray(np.stack(bits, axis=1).astype(np.int64))
-    data, _ = _code(b, x.astype(np.uint8), table_bits, alpha, False, np.zeros(1, np.uint8))
+    data, _, _ = _code(b, x.astype(np.uint8), table_bits, alpha, False, np.zeros(1, np.uint8))
     return data
 
 
 def decode(bits, n, data, table_bits=TABLE_BITS, alpha=ALPHA):
     b = np.ascontiguousarray(np.stack(bits, axis=1).astype(np.int64))
-    _, dec = _code(b, np.zeros(n, np.uint8), table_bits, alpha, True, data)
+    _, dec, _ = _code(b, np.zeros(n, np.uint8), table_bits, alpha, True, data)
     return dec
+
+
+def probabilities(bits, x, table_bits=TABLE_BITS, alpha=ALPHA):
+    """Per-pixel P(1) of the sequential CTW (each depends only on earlier pixels)."""
+    b = np.ascontiguousarray(np.stack(bits, axis=1).astype(np.int64))
+    _, _, probs = _code(b, x.astype(np.uint8), table_bits, alpha, False, np.zeros(1, np.uint8))
+    return probs
+
+
+@njit(cache=True)
+def mix_bits(x, p_a, p_b, sel, n_sets, lr):
+    """Ideal cost (bits) of a logistic mix of two models, weights chosen by sel[i] in [0, n_sets).
+
+    p = squash(w0 * st(p_a) + w1 * st(p_b)); after each pixel, w += lr * (x - p) * inputs.
+    """
+    w = np.zeros((n_sets, 2))
+    w[:, 0] = 1.0  # start by trusting model a
+    total = 0.0
+    for i in range(x.size):
+        pa = min(max(p_a[i], 1e-6), 1 - 1e-6)
+        pb = min(max(p_b[i], 1e-6), 1 - 1e-6)
+        sa = math.log(pa / (1 - pa))
+        sb = math.log(pb / (1 - pb))
+        k = sel[i]
+        t = w[k, 0] * sa + w[k, 1] * sb
+        t = min(max(t, -40.0), 40.0)
+        p = 1.0 / (1.0 + math.exp(-t))
+        p = min(max(p, 1.0 / 65536), 1 - 1.0 / 65536)
+        total -= math.log2(p if x[i] else 1 - p)
+        err = x[i] - p
+        w[k, 0] += lr * err * sa
+        w[k, 1] += lr * err * sb
+    return total
+
+
+@njit(cache=True)
+def _encode_probs(x, probs):
+    out = np.zeros(x.size // 4 + 64, np.uint8)
+    nout = 0
+    x1 = np.uint32(0)
+    x2 = np.uint32(0xFFFFFFFF)
+    for i in range(x.size):
+        q = np.int64(probs[i] * 65536.0 + 0.5)
+        q = min(max(q, 1), 65535)
+        rng = np.uint64(x2 - x1)
+        xmid = np.uint32(np.uint64(x1) + ((rng * np.uint64(q)) >> np.uint64(16)))
+        if x[i]:
+            x2 = xmid
+        else:
+            x1 = np.uint32(xmid + np.uint32(1))
+        while ((x1 ^ x2) & np.uint32(0xFF000000)) == 0:
+            if nout >= out.size:
+                out = np.concatenate((out, np.zeros(out.size, np.uint8)))
+            out[nout] = np.uint8(x2 >> np.uint32(24))
+            nout += 1
+            x1 = np.uint32(x1 << np.uint32(8))
+            x2 = np.uint32((x2 << np.uint32(8)) | np.uint32(255))
+    for k in range(1, 5):
+        unit = np.uint64(1) << np.uint64(32 - 8 * k)
+        v = ((np.uint64(x1) + unit - np.uint64(1)) // unit) * unit
+        if v <= np.uint64(x2):
+            for j in range(k):
+                if nout >= out.size:
+                    out = np.concatenate((out, np.zeros(out.size, np.uint8)))
+                out[nout] = np.uint8((v >> np.uint64(24 - 8 * j)) & np.uint64(255))
+                nout += 1
+            break
+    return out[:nout]
+
+
+@njit(cache=True)
+def mix_probs(x, p_a, p_b, lr):
+    """The mixed P(1) per pixel (one weight set), as used by mix_bits."""
+    w0, w1 = 1.0, 0.0
+    out = np.zeros(x.size)
+    for i in range(x.size):
+        pa = min(max(p_a[i], 1e-6), 1 - 1e-6)
+        pb = min(max(p_b[i], 1e-6), 1 - 1e-6)
+        sa = math.log(pa / (1 - pa))
+        sb = math.log(pb / (1 - pb))
+        t = min(max(w0 * sa + w1 * sb, -40.0), 40.0)
+        p = 1.0 / (1.0 + math.exp(-t))
+        out[i] = p
+        err = x[i] - p
+        w0 += lr * err * sa
+        w1 += lr * err * sb
+    return out
+
+
+def encode_mixed(x, p_a, p_b, lr=0.02):
+    return _encode_probs(x.astype(np.uint8), mix_probs(x.astype(np.int64), p_a, p_b, lr))
+
+
+@njit(cache=True)
+def _decode_probs_seq(data, n, p_a, p_b, lr):
+    """Decode a mixed stream. p_a/p_b are the two models' P(1); in a real decoder they come from
+    CTWs updated with the decoded pixels, here they are passed in (they are causal)."""
+    out = np.zeros(n, np.uint8)
+    x1 = np.uint32(0)
+    x2 = np.uint32(0xFFFFFFFF)
+    xv = np.uint32(0)
+    pos = 0
+    for _ in range(4):
+        b = data[pos] if pos < data.size else 0
+        pos += 1
+        xv = np.uint32((xv << np.uint32(8)) | np.uint32(b))
+    w0, w1 = 1.0, 0.0
+    for i in range(n):
+        pa = min(max(p_a[i], 1e-6), 1 - 1e-6)
+        pb = min(max(p_b[i], 1e-6), 1 - 1e-6)
+        sa = math.log(pa / (1 - pa))
+        sb = math.log(pb / (1 - pb))
+        t = min(max(w0 * sa + w1 * sb, -40.0), 40.0)
+        p = 1.0 / (1.0 + math.exp(-t))
+        q = np.int64(p * 65536.0 + 0.5)
+        q = min(max(q, 1), 65535)
+        rng = np.uint64(x2 - x1)
+        xmid = np.uint32(np.uint64(x1) + ((rng * np.uint64(q)) >> np.uint64(16)))
+        sym = 1 if xv <= xmid else 0
+        out[i] = sym
+        if sym:
+            x2 = xmid
+        else:
+            x1 = np.uint32(xmid + np.uint32(1))
+        while ((x1 ^ x2) & np.uint32(0xFF000000)) == 0:
+            b = data[pos] if pos < data.size else 0
+            pos += 1
+            xv = np.uint32((xv << np.uint32(8)) | np.uint32(b))
+            x1 = np.uint32(x1 << np.uint32(8))
+            x2 = np.uint32((x2 << np.uint32(8)) | np.uint32(255))
+        err = sym - p
+        w0 += lr * err * sa
+        w1 += lr * err * sb
+    return out
+
+
+def decode_mixed(data, n, p_a, p_b, lr=0.02):
+    return _decode_probs_seq(data, n, p_a, p_b, lr)

@@ -49,3 +49,16 @@ def v4_bits(m):
 
 def real_v4(m):
     return _file_bits(m, v4_bits(m), 1 / 4)
+
+
+def real_mix(m):
+    """v3 and v3-with-copy-bits CTWs, mixed by one online logistic weight pair."""
+    x = m.ravel()
+    nb = neighbour_bits(m, 24)
+    f = [np.asarray(p, dtype=np.uint8).ravel() for p in features_combo.line_match48(m)]
+    pa = realcoder.probabilities(nb[:2] + f + nb[2:], x, 24, 1 / 4)
+    pb = realcoder.probabilities(v4_bits(m), x, 24, 1 / 4)
+    payload = realcoder.encode_mixed(x, pa, pb)
+    h, w = m.shape
+    total = dimension_bits(w, h) + ALPHA_HEADER_BITS + 8 * len(payload)
+    return 8 * math.ceil(total / 8)

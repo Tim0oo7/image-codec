@@ -1,6 +1,6 @@
 # Binary alpha: the prediction model
 
-Status: research v3.1 (2026-10-30). Nothing here is final. Every number can be reproduced with the
+Status: research v3.2 (2026-10-30). Nothing here is final. Every number can be reproduced with the
 scripts in [research/alpha_binary](../research/alpha_binary/README.md). v2 of this document
 (format survey, colour-key ideas, first measurements) is in the git history.
 
@@ -16,18 +16,20 @@ arithmetic coder reaches that within a few bytes per image, so the coder itself 
   thresholded at 50 % coverage.
 - **Where the bits go:** 96 % of pixels are flat and cost almost nothing. Nearly half of all
   bits are spent on *staircase steps*, the pixels where an edge moves sideways.
-- **The proposed predictor** adds two small, side-information-free models to the context of a
-  CTW model:
+- **The proposed predictor** adds small, side-information-free models to the context of a CTW
+  model, and mixes two such models:
   - a **line predictor** that follows each edge upward and predicts its next step from the
     digital-straight-line pattern;
-  - a **match predictor** that copies what followed the same 48-pixel neighbourhood last time.
+  - a **match predictor** that copies what followed the same 48-pixel neighbourhood last time;
+  - a second CTW that also sees an **LZ-style copy predictor**, and an online two-weight mixer
+    that learns per image how much to trust it.
 - **Real files, untouched test set:** a working coder (sequential CTW in a bounded hash table,
   16-bit probabilities, arithmetic coding, the dimensions field, the alpha header) was run on
-  a test split that no design decision was made on (§4.0). In total it is **2.06× smaller than
-  JPEG XL, 2.6× smaller than WebP, 4.0× smaller than PNG, 5.8× smaller than AVIF and 1.3×
-  smaller than an idealised JBIG2 without headers**. Per mask, it is smaller than JPEG XL and
-  AVIF on all 1,421, and smaller than WebP on 1,395 (WebP's wins are animation sprite strips).
-- **Compared with v2:** 12.7 % smaller as real files on the test set (8.4 % ideal on the full set).
+  a test split that no design decision was made on (§4.0). In total it is **2.13× smaller than
+  JPEG XL, 2.6× smaller than WebP, 4.2× smaller than PNG, 6.0× smaller than AVIF and 1.37×
+  smaller than an idealised JBIG2 without headers**. Per mask, it is smaller than JPEG XL, PNG
+  and AVIF on all 1,421, and smaller than WebP on 1,398 (WebP's wins are animation sprite strips).
+- **Compared with v2:** 15.8 % smaller as real files on the test set (same headers).
 - **What's stored:** the dimensions field, then an alpha-values code that is a single bit for
   the usual pair (0, 255), then the pixels. No mode flags, tables, offsets, colour keys or
   encoder choices. The decoder infers everything from pixels it already has.
@@ -128,7 +130,30 @@ that followed this key most recently*. The two bits are **exists** (the key was 
 offsets, like LZ77 but per pixel. In a real decoder the table is a fixed-size hash table; the
 measurement uses exact keys, and collisions in a reasonably sized table cost very little.
 
-### 3.3 What is stored
+### 3.3 Mixing in a copy model
+
+A second CTW uses a longer context: the same 30 bits with 4 more inserted after the 14th
+neighbour. They come from an **LZ-style copy predictor**:
+
+- it keeps a copy offset d (in raster positions) and a streak, the number of pixels in a row that
+  `x[i − d]` predicted correctly;
+- when a prediction fails, d is replaced by the offset to the most recent pixel with the same
+  48-neighbour context;
+- the bits are [offset set], [x[i − d]], [streak ≥ 8] and [streak ≥ 64].
+
+Both CTWs give a probability, and the coded probability is
+
+```
+p = squash(w0 · st(p_a) + w1 · st(p_b)),   st(p) = ln(p / (1 − p)),   squash = st⁻¹
+after the pixel:  w_k += 0.02 · (x − p) · st(p_k),     starting from w0 = 1, w1 = 0
+```
+
+So each image starts with the plain model and moves weight to the copy model only if the copy
+model is actually better there. As a fixed context bit, the copy predictor won on sprite strips
+but lost elsewhere and didn't generalise (§4.3). Mixed, it keeps the wins and loses at most
+0.6 % on any category. Cost: a second CTW pass.
+
+### 3.4 What is stored
 
 | Field | Size |
 |---|---|
@@ -210,24 +235,26 @@ Pixel art is the closest race: there WebP's LZ77 is as good as JPEG XL, because 
 `realcoder.py` codes for real: sequential CTW in a direct-mapped table of 2²⁴ nodes (a collision
 resets the slot), the probability rounded to 16 bits, and a 32-bit binary arithmetic coder that
 ends with the fewest bytes that still decode. Files include the dimensions field
-(`image_codec.dimensions`) and the alpha-values code, and the round trip is checked. Model
-arithmetic is still floating point.
+(`image_codec.dimensions`) and the alpha-values code, and the round trip is checked (CTW
+streams in full; mixed streams with the two models' probabilities passed in). Model arithmetic
+is still floating point. The table is for v3.2 (mixed). On the same files, v3 without the copy
+model totals 219,988 bytes, 3.4 % more.
 
 | Category | Masks | Real file (bytes) | JPEG XL | WebP | PNG | AVIF | JBIG2, ideal, no header |
 |---|---|---|---|---|---|---|---|
-| cutouts_thr | 70 | 51,010 | 2.06× (70/70) | 3.05× (70/70) | 4.88× (70/70) | 7.88× (70/70) | 1.23× (70/70) |
-| glyphs | 300 | 22,410 | 2.12× (300/300) | 3.01× (300/300) | 5.03× (300/300) | 5.82× (300/300) | 1.32× (299/300) |
-| icons_thr | 194 | 14,920 | 2.93× (194/194) | 4.30× (194/194) | 8.52× (194/194) | 12.65× (194/194) | 1.54× (194/194) |
-| misc | 5 | 8,038 | 1.42× (5/5) | 2.25× (5/5) | 3.18× (5/5) | 2.42× (5/5) | 1.10× (5/5) |
-| pixelart | 260 | 5,854 | 2.54× (260/260) | 3.13× (260/260) | 5.18× (260/260) | 14.27× (260/260) | 1.22× (254/260) |
-| plants_thr | 21 | 47,357 | 1.61× (21/21) | 2.81× (21/21) | 3.87× (21/21) | 3.08× (21/21) | 1.15× (21/21) |
-| system | 300 | 14,888 | 2.05× (300/300) | 2.43× (300/300) | 3.88× (300/300) | 10.40× (300/300) | 1.22× (276/300) |
-| user | 271 | 55,511 | 2.21× (271/271) | 1.25× (245/271) | 1.74× (263/271) | 2.82× (271/271) | 1.56× (264/271) |
-| **All** | 1,421 | **219,988** | **2.06×** (1,421) | **2.56×** (1,395) | **4.01×** (1,413) | **5.83×** (1,421) | **1.32×** (1,383) |
+| cutouts_thr | 70 | 50,928 | 2.07× (70/70) | 3.05× (70/70) | 4.89× (70/70) | 7.89× (70/70) | 1.24× (70/70) |
+| glyphs | 300 | 22,477 | 2.12× (300/300) | 3.00× (300/300) | 5.02× (300/300) | 5.80× (300/300) | 1.31× (299/300) |
+| icons_thr | 194 | 14,778 | 2.95× (194/194) | 4.34× (194/194) | 8.60× (194/194) | 12.78× (194/194) | 1.56× (194/194) |
+| misc | 5 | 8,007 | 1.43× (5/5) | 2.25× (5/5) | 3.19× (5/5) | 2.43× (5/5) | 1.10× (5/5) |
+| pixelart | 260 | 5,737 | 2.59× (260/260) | 3.20× (260/260) | 5.28× (260/260) | 14.56× (260/260) | 1.24× (259/260) |
+| plants_thr | 21 | 47,649 | 1.60× (21/21) | 2.79× (21/21) | 3.84× (21/21) | 3.06× (21/21) | 1.15× (21/21) |
+| system | 300 | 14,627 | 2.09× (300/300) | 2.47× (300/300) | 3.95× (300/300) | 10.59× (300/300) | 1.24× (277/300) |
+| user | 271 | 48,352 | 2.54× (271/271) | 1.43× (248/271) | 1.99× (271/271) | 3.24× (271/271) | 1.79× (265/271) |
+| **All** | 1,421 | 212,555 | 2.13× (1,421/1,421) | 2.64× (1,398/1,421) | 4.15× (1,421/1,421) | 6.03× (1,421/1,421) | 1.37× (1,390/1,421) |
 
 Each cell is the other format's total divided by ours, with the number of masks where ours is
 smaller. JBIG2 is the generic-region template 0 with an ideal adaptive estimator and **no
-header at all**, so it is flattered. Its 38 wins are tiny icons where our dimensions and alpha
+header at all**, so it is flattered. Its 31 wins are tiny icons where our dimensions and alpha
 header outweigh the difference (model against model it wins on 5 masks, by 5 bytes in total).
 
 Real against ideal: the real files are 3.6 % above the ideal cost in total. That covers headers,
@@ -263,7 +290,7 @@ nothing, as expected: their edges carry real information.
 | **Dev split from here on** | | |
 | Left-right mirror (axis from a symmetric row above) | −3 % glyphs, ±0 elsewhere, −0.4 % balanced | Not worth 2 bits |
 | Top-bottom mirror, row repetition | ±0 | Dropped |
-| LZ-style copy with a streak counter (keeps an offset while it predicts right) | Sprite strip 928 → 236 bytes, text 3,889 → 1,637. Dev −1.5 % (ideal), **test +0.7 % (real)** | Rejected as a context bit: it doesn't generalise, and its bits add table pressure. See §6 (mixing) |
+| LZ-style copy with a streak counter (keeps an offset while it predicts right) | Sprite strip 928 → 236 bytes, text 3,889 → 1,637. Dev −1.5 % (ideal), **test +0.7 % (real)** | Rejected as a context bit (doesn't generalise, adds table pressure). **Adopted through mixing** (§3.3): dev −1.8 %, test −3.4 % real |
 | Copy fused into the match bits | +2 % | Rejected |
 | Curve rule (straight stretch only, run-length trend) | Polygons 0.40 → 0.35 bits per boundary pixel, but +0.4 % on dev | Not adopted |
 | Scan order: Hilbert, coarse-to-fine (same 16-pixel window plus decoded-or-not bits) | Hilbert 1.35× larger, coarse-to-fine 2.9× larger than raster | Raster |
@@ -296,10 +323,9 @@ feature values up to that point.
 
 ## 6. Next steps
 
-0. **Mixing instead of more context bits.** An extra bit in the CTW context only pays where it's
-   informative: the copy predictor wins big on sprite strips and loses a little everywhere else.
-   A two-input logistic mix of "CTW without copy" and "CTW with copy" could keep the wins without
-   the losses. The sprite strips are the last place where WebP still wins.
+0. **More models through the mixer.** Mixing (§3.3) is how future predictors should enter:
+   symmetry, the curve rule and larger windows all helped some images and hurt others as
+   context bits. The sprite strips are the last place where WebP still wins (23 masks).
 
 1. **Fixed-point, bounded CTW.** Integer counts, a fixed-size node table, and a specified hash for
    the match table. Measure the loss against the ideal numbers here.

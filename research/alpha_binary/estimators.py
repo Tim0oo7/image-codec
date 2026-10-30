@@ -140,3 +140,35 @@ def fused_conf(m):
 def v3_curve(m):
     f = features_combo.features_line.line_curve(m) + features_combo.features_match.match48(m)
     return cost(m, f, 24, alpha=1 / 4, at=2)
+
+
+# ---- mixing two complete models (dev only) ----
+import realcoder  # noqa: E402
+import realconfigs  # noqa: E402
+
+
+def _probs_v3_v4(m):
+    x = m.ravel()
+    nb = neighbour_bits(m, 24)
+    f = [np.asarray(p, dtype=np.uint8).ravel() for p in features_combo.line_match48(m)]
+    pa = realcoder.probabilities(nb[:2] + f + nb[2:], x, 24)
+    pb = realcoder.probabilities(realconfigs.v4_bits(m), x, 24)
+    return x, pa, pb
+
+
+def ctw_v3_seq(m):
+    x, pa, _ = _probs_v3_v4(m)
+    pa = np.clip(pa, 1 / 65536, 1 - 1 / 65536)
+    return float(-np.sum(np.where(x == 1, np.log2(pa), np.log2(1 - pa))))
+
+
+def mix_v3_v4(m):
+    x, pa, pb = _probs_v3_v4(m)
+    has, val, s8, s64 = features_lz.lz48(m)
+    sel = (s8.ravel().astype(np.int64) + s64.ravel()).astype(np.int64)  # 0, 1, 2
+    return realcoder.mix_bits(x.astype(np.int64), pa, pb, sel, 3, 0.02)
+
+
+def mix_v3_v4_1set(m):
+    x, pa, pb = _probs_v3_v4(m)
+    return realcoder.mix_bits(x.astype(np.int64), pa, pb, np.zeros(x.size, np.int64), 1, 0.02)
