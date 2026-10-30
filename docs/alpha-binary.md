@@ -1,6 +1,6 @@
 # Binary alpha: the prediction model
 
-Status: research v3 (2026-10-30). Nothing here is final. Every number can be reproduced with the
+Status: research v3.1 (2026-10-30). Nothing here is final. Every number can be reproduced with the
 scripts in [research/alpha_binary](../research/alpha_binary/README.md). v2 of this document
 (format survey, colour-key ideas, first measurements) is in the git history.
 
@@ -21,11 +21,15 @@ arithmetic coder reaches that within a few bytes per image, so the coder itself 
   - a **line predictor** that follows each edge upward and predicts its next step from the
     digital-straight-line pattern;
   - a **match predictor** that copies what followed the same 48-pixel neighbourhood last time.
-- **Result:** 8.4 % smaller in total than the previous plan, and smaller in every category:
-  −23 % on icons, −13 % on app/cache images, −11 % on cutouts, −8 % on glyphs, −6.5 % on
-  pixel art. Against JPEG XL (lossless, effort 9, mask coded on its own) it is 1.8× smaller
-  in total and smaller on every one of the 2,130 masks.
-- **What's stored:** only the two alpha values. No mode flags, tables, offsets, colour keys or
+- **Real files, untouched test set:** a working coder (sequential CTW in a bounded hash table,
+  16-bit probabilities, arithmetic coding, the dimensions field, the alpha header) was run on
+  a test split that no design decision was made on (§4.0). In total it is **2.06× smaller than
+  JPEG XL, 2.6× smaller than WebP, 4.0× smaller than PNG, 5.8× smaller than AVIF and 1.3×
+  smaller than an idealised JBIG2 without headers**. Per mask, it is smaller than JPEG XL and
+  AVIF on all 1,421, and smaller than WebP on 1,395 (WebP's wins are animation sprite strips).
+- **Compared with v2:** 12.7 % smaller as real files on the test set (8.4 % ideal on the full set).
+- **What's stored:** the dimensions field, then an alpha-values code that is a single bit for
+  the usual pair (0, 255), then the pixels. No mode flags, tables, offsets, colour keys or
   encoder choices. The decoder infers everything from pixels it already has.
 - **Checked end to end:** a pixel-by-pixel decoder simulation reproduces the measured cost
   exactly, so the predictor is causal (decodable) and the numbers aren't an artefact.
@@ -128,8 +132,15 @@ measurement uses exact keys, and collisions in a reasonably sized table cost ver
 
 | Field | Size |
 |---|---|
-| The two alpha values (lo, hi) | 2 × bit depth |
+| The two alpha values (lo, hi) | `1` = (0, max) · `00` + hi · `010` + lo (hi = max) · `011` + lo + hi |
 | Arithmetic-coded pixels | — |
+
+Of the 4,564 binary-alpha images found, 96.7 % use (0, 255), 98.4 % have lo = 0 and 98.2 % have
+hi = 255, so the values cost about 1.3 bits on average instead of 16. That saves about 2 bytes
+per image: 8 % on a set of small pixel-art tiles.
+
+The exact line-predictor definition, with tie-breaking and worked examples, is in
+[alpha-binary-line-predictor.md](alpha-binary-line-predictor.md).
 
 Nothing else. In particular, these items from v2 are **dropped**:
 
@@ -142,6 +153,16 @@ Nothing else. In particular, these items from v2 are **dropped**:
 | A trained starting table in the spec | Measured: only 1.2 % on top of CTW (§4.3). Not worth a 4,096-entry table in the spec |
 
 ## 4. Measurements
+
+### 4.0 Method: development and test split
+
+After the review of v3, the corpus was split by **source object** (`split.py`): all renderings
+of a glyph, a whole Kenney pack, the same icon at 64 and 512 px, and one folder of app/cache
+images always land on the same side. Every design decision after v3 was made on the dev split.
+The test split (1,421 masks: cutouts 70, glyphs 300, icons 194, pixel art 260 from two packs,
+plants 21, system 300, user 271, misc 5) was only used for the final numbers in §4.1c. The v3
+design itself was chosen before the split, on data that overlaps both halves, so its test
+numbers may be slightly optimistic.
 
 Exact ideal code lengths (`harness.py`, from per-context counts). Bytes, totals per category, and
 the ratio to the v2 plan (CTW over 24 neighbours, α = 1/16).
@@ -184,6 +205,36 @@ matters for the smallest icons.
 
 Pixel art is the closest race: there WebP's LZ77 is as good as JPEG XL, because tile sheets repeat.
 
+### 4.1c Real files on the test split
+
+`realcoder.py` codes for real: sequential CTW in a direct-mapped table of 2²⁴ nodes (a collision
+resets the slot), the probability rounded to 16 bits, and a 32-bit binary arithmetic coder that
+ends with the fewest bytes that still decode. Files include the dimensions field
+(`image_codec.dimensions`) and the alpha-values code, and the round trip is checked. Model
+arithmetic is still floating point.
+
+| Category | Masks | Real file (bytes) | JPEG XL | WebP | PNG | AVIF | JBIG2, ideal, no header |
+|---|---|---|---|---|---|---|---|
+| cutouts_thr | 70 | 51,010 | 2.06× (70/70) | 3.05× (70/70) | 4.88× (70/70) | 7.88× (70/70) | 1.23× (70/70) |
+| glyphs | 300 | 22,410 | 2.12× (300/300) | 3.01× (300/300) | 5.03× (300/300) | 5.82× (300/300) | 1.32× (299/300) |
+| icons_thr | 194 | 14,920 | 2.93× (194/194) | 4.30× (194/194) | 8.52× (194/194) | 12.65× (194/194) | 1.54× (194/194) |
+| misc | 5 | 8,038 | 1.42× (5/5) | 2.25× (5/5) | 3.18× (5/5) | 2.42× (5/5) | 1.10× (5/5) |
+| pixelart | 260 | 5,854 | 2.54× (260/260) | 3.13× (260/260) | 5.18× (260/260) | 14.27× (260/260) | 1.22× (254/260) |
+| plants_thr | 21 | 47,357 | 1.61× (21/21) | 2.81× (21/21) | 3.87× (21/21) | 3.08× (21/21) | 1.15× (21/21) |
+| system | 300 | 14,888 | 2.05× (300/300) | 2.43× (300/300) | 3.88× (300/300) | 10.40× (300/300) | 1.22× (276/300) |
+| user | 271 | 55,511 | 2.21× (271/271) | 1.25× (245/271) | 1.74× (263/271) | 2.82× (271/271) | 1.56× (264/271) |
+| **All** | 1,421 | **219,988** | **2.06×** (1,421) | **2.56×** (1,395) | **4.01×** (1,413) | **5.83×** (1,421) | **1.32×** (1,383) |
+
+Each cell is the other format's total divided by ours, with the number of masks where ours is
+smaller. JBIG2 is the generic-region template 0 with an ideal adaptive estimator and **no
+header at all**, so it is flattered. Its 38 wins are tiny icons where our dimensions and alpha
+header outweigh the difference (model against model it wins on 5 masks, by 5 bytes in total).
+
+Real against ideal: the real files are 3.6 % above the ideal cost in total. That covers headers,
+termination, 16-bit probabilities and table collisions, and it rises to 10–18 % on sets of tiny
+icons, where the fixed header matters most. A 2²² table instead of 2²⁴ costs up to 36 % on the
+most complex mask (text), so the node table needs care in the spec (§6).
+
 ### 4.2 Synthetic shapes: how close to the theory
 
 Bits per boundary pixel (pairs of differing 4-neighbours), CTW over 24 neighbours:
@@ -209,6 +260,13 @@ nothing, as expected: their edges carry real information.
 | Edge step from more history, averaged (k = 4, 8 rows) | worse than the last step | The run-length (Sturmian) rule replaces it |
 | Match key of 80 or 120 neighbours | worse than 48 on small images | 48 kept |
 | Feature bits first in the context (before W, N) | 0.4–0.8 % worse | after 2 neighbours |
+| **Dev split from here on** | | |
+| Left-right mirror (axis from a symmetric row above) | −3 % glyphs, ±0 elsewhere, −0.4 % balanced | Not worth 2 bits |
+| Top-bottom mirror, row repetition | ±0 | Dropped |
+| LZ-style copy with a streak counter (keeps an offset while it predicts right) | Sprite strip 928 → 236 bytes, text 3,889 → 1,637. Dev −1.5 % (ideal), **test +0.7 % (real)** | Rejected as a context bit: it doesn't generalise, and its bits add table pressure. See §6 (mixing) |
+| Copy fused into the match bits | +2 % | Rejected |
+| Curve rule (straight stretch only, run-length trend) | Polygons 0.40 → 0.35 bits per boundary pixel, but +0.4 % on dev | Not adopted |
+| Scan order: Hilbert, coarse-to-fine (same 16-pixel window plus decoded-or-not bits) | Hilbert 1.35× larger, coarse-to-fine 2.9× larger than raster | Raster |
 | α = 1/32, 1/16, 1/8, 1/2 | 1/4 is best, with and without the new bits (−1 % on the v2 model too) | α = 1/4 |
 
 ### 4.4 Verification
@@ -232,8 +290,16 @@ feature values up to that point.
 | Anchor points + diffusion, graphs, wavelets, GSP transforms | Made for many-valued pixels. A 1-bit mask has no residuals to shrink |
 | MED / LOCO-I / Paeth, YCoCg, palette sorting, BWT/MTF | For the colour channels, not the mask |
 | Colour correlation | Real, but a separate decision once colour coding exists (v2, §6 in git history) |
+| BPG (HEVC) | Alpha is a second, monochrome HEVC stream, optionally premultiplied ([spec](https://bellard.org/bpg/bpg_spec.txt)). Nothing binary-specific; it should land near AVIF, which is the same idea with AV1. Not measured: no encoder can be run here |
+| FUIF (FLIF, then JPEG XL modular) | Alpha is another channel, coded with MANIAC context trees that can use other channels' values as properties ([FUIF](https://github.com/cloudinary/fuif)). Its descendant, JPEG XL modular, is measured above. The idea worth keeping is cross-channel context, i.e. the colour correlation |
+| Scan order (rows, Hilbert, coarse-to-fine) | Measured (§4.3). Rows win because each pixel sees a full half-plane of decoded neighbours |
 
 ## 6. Next steps
+
+0. **Mixing instead of more context bits.** An extra bit in the CTW context only pays where it's
+   informative: the copy predictor wins big on sprite strips and loses a little everywhere else.
+   A two-input logistic mix of "CTW without copy" and "CTW with copy" could keep the wins without
+   the losses. The sprite strips are the last place where WebP still wins.
 
 1. **Fixed-point, bounded CTW.** Integer counts, a fixed-size node table, and a specified hash for
    the match table. Measure the loss against the ideal numbers here.

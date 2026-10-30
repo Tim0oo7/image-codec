@@ -89,7 +89,8 @@ index order, then free.
 ## Alpha channel
 
 - Constant alpha: header flag + value, no payload.
-- Binary alpha: the two values, then the pixels coded with the predictor in
+- Binary alpha: the two values, coded as `1` = (0, max), `00` + hi = (0, hi),
+  `010` + lo = (lo, max), `011` + lo + hi otherwise. Then the pixels, coded with the predictor in
   [alpha-binary.md](alpha-binary.md) (CTW over neighbours + line and match bits, no other side
   information).
 - Whether alpha is coded before or after the colour channels is still open.

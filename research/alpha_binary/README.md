@@ -14,7 +14,10 @@ research tools, not part of the codec.
 | `ctw_prior.py`, `prior_configs.py`, `prior_table.py` | Trained starting tables (priors) for CTW and for a plain template |
 | `where_bits.py` | Per-pixel cost split by local geometry |
 | `simulate_decoder.py` | Pixel-by-pixel decoder simulation that must match the count-based cost exactly |
-| `baselines.py` | JPEG XL, WebP and PNG as harness cost functions |
+| `baselines.py` | JPEG XL, WebP, PNG, AVIF and an ideal JBIG2 generic template as harness cost functions |
+| `split.py` | Dev/test split by source object (glyph, pack, icon name, folder) |
+| `realcoder.py`, `realconfigs.py`, `test_realcoder.py` | Real coder: sequential CTW in a bounded table, 16-bit probabilities, arithmetic coding, round trip; real file sizes incl. headers |
+| `features_lz.py`, `features_sym.py`, `scan_order.py` | Rejected experiments: LZ-style copy, mirror/row repetition, scan orders |
 | `scan_alpha.py`, `threshold_scan.py`, `render_glyphs.py` | Build the corpus: find binary alpha, derive thresholded masks, render icon fonts |
 | `measure.py`, `analyze.py` | The v2 measurements (synthetic masks, colour-aware contexts) |
 | `test_*.py` | CTW against a sequential CTW, and the causality checker against known leaks |

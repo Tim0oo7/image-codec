@@ -5,7 +5,7 @@ feature planes are recomputed from that partial image and only their value at i 
 sequential CTW then assigns the probability of the true pixel. If the total equals
 harness.cost(...) on the full image, the features are causal and the measurement is exact.
 
-Usage: python simulate_decoder.py MANIFEST.json [N_IMAGES]
+Usage: python simulate_decoder.py MANIFEST.json [N_IMAGES] [v3|v4]
 """
 
 import json
@@ -16,11 +16,21 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-import features_combo  # noqa: E402
-from harness import cost, load, neighbour_bits  # noqa: E402
+import realconfigs  # noqa: E402
+from harness import load  # noqa: E402
+from idealcost import ctw_bits  # noqa: E402
 
-FEATURES = features_combo.line_match48
-NEIGHBOURS, AT, ALPHA = 24, 2, 1 / 4
+ALPHA = 1 / 4
+
+
+def v3_bits(m):
+    nb = realconfigs.neighbour_bits(m, 24)
+    f = [p.ravel() for p in realconfigs.features_combo.line_match48(m)]
+    return nb[:2] + f + nb[2:]
+
+
+LAYOUTS = {"v3": v3_bits, "v4": realconfigs.v4_bits}
+LAYOUT = LAYOUTS["v3"]
 
 
 def sequential_bits(m):
@@ -31,11 +41,8 @@ def sequential_bits(m):
     nodes = {}  # (depth, prefix) -> [n0, n1, ln Pe, ln Pw]
     total = 0.0
     for i in range(n):
-        y, xx = divmod(i, w)
         partial = decoded.copy()
-        nb = [b[i] for b in neighbour_bits(partial, NEIGHBOURS)]
-        feats = [int(np.asarray(p)[y, xx]) for p in FEATURES(partial)]
-        bits = nb[:AT] + feats + nb[AT:]
+        bits = [int(np.asarray(b).ravel()[i]) for b in LAYOUT(partial)]
         depth = len(bits)
         path, p = [(0, 0)], 0
         for d in range(depth):
@@ -59,8 +66,10 @@ def sequential_bits(m):
 
 
 def main():
+    global LAYOUT
     items = json.load(open(sys.argv[1]))
     want = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+    LAYOUT = LAYOUTS[sys.argv[3] if len(sys.argv) > 3 else "v3"]
     seen = set()
     done = 0
     for it in items:
@@ -68,7 +77,7 @@ def main():
             continue
         seen.add(it["category"])
         m, _ = load(it)
-        fast = cost(m, FEATURES(m), NEIGHBOURS, alpha=ALPHA, at=AT)
+        fast = ctw_bits(m.ravel(), LAYOUT(m), len(LAYOUT(m)), ALPHA)
         slow = sequential_bits(m)
         ok = abs(fast - slow) < 1e-6 * max(1.0, fast)
         print(

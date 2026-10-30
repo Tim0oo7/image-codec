@@ -64,7 +64,8 @@ def next_step(deltas):
     return last, False  # cur_len == min < max: ambiguous
 
 
-def predictions(m):
+def predictions(m, step=None):
+    step = step or next_step
     """E[y, x], C[y, x]: predicted end of the current run and whether it is certain."""
     h, w = m.shape
     E = np.full((h, w), -1, dtype=np.int64)
@@ -87,7 +88,7 @@ def predictions(m):
                 r -= 1
                 hist.append(int(rows[r][0][j]))
             deltas = [hist[k] - hist[k + 1] for k in range(len(hist) - 1)][::-1]
-            res = next_step(deltas)
+            res = step(deltas)
             if res is not None:
                 pred[i] = pos1[i] + res[0]
                 cert[i] = res[1]
@@ -105,8 +106,8 @@ def predictions(m):
     return E, C
 
 
-def line_planes(m, certain_bit=True, near=True):
-    E, C = predictions(m)
+def line_planes(m, certain_bit=True, near=True, step=None):
+    E, C = predictions(m, step)
     x = np.arange(m.shape[1])[None, :]
     known = E >= 0
     planes = [(known & (x == E)).astype(np.uint8), (known & (x > E)).astype(np.uint8)]
@@ -123,3 +124,46 @@ def line(m):
 
 def line_nocert(m):
     return line_planes(m, certain_bit=False)
+
+
+def straight_suffix(deltas):
+    """Longest suffix whose values span at most two neighbouring steps (a curve's current
+    stretch)."""
+    k = len(deltas)
+    lo = hi = deltas[-1]
+    while k > 1:
+        d = deltas[k - 2]
+        if max(hi, d) - min(lo, d) > 1:
+            break
+        lo, hi = min(lo, d), max(hi, d)
+        k -= 1
+    return deltas[k - 1 :]
+
+
+def next_step_curve(deltas):
+    """Like next_step, but on the current straight stretch only, and when the frequent step's
+    run lengths drift (a curve), extrapolate their trend: L_next = 2 * L_last - L_before."""
+    if not deltas:
+        return None
+    d = straight_suffix(deltas)
+    res = next_step(d)
+    if res is None or res[1]:
+        return res
+    last = d[-1]
+    runs = []
+    for v in d:
+        if runs and runs[-1][0] == v:
+            runs[-1][1] += 1
+        else:
+            runs.append([v, 1])
+    lens = [n for v, n in runs[1:-1] if v == last]
+    vals = set(d)
+    if len(lens) < 2 or len(vals) != 2:
+        return res
+    other = (vals - {last}).pop()
+    expect = max(1, 2 * lens[-1] - lens[-2])
+    return (other if runs[-1][1] >= expect else last), False
+
+
+def line_curve(m):
+    return line_planes(m, step=next_step_curve)
