@@ -1,74 +1,250 @@
-# Binary alpha: research and plan
+# Binary alpha: the prediction model
 
-Status: research v2 (2026-10-15). Nothing here is final. The measurements can be reproduced
-with the scripts in [research/alpha_binary](../research/alpha_binary/README.md).
+Status: research v3 (2026-10-30). Nothing here is final. Every number can be reproduced with the
+scripts in [research/alpha_binary](../research/alpha_binary/README.md). v2 of this document
+(format survey, colour-key ideas, first measurements) is in the git history.
+
+This document is only about **prediction**: the probability p that the next pixel is opaque,
+given everything decoded so far. The cost of a pixel is −log₂ p of what it really is, and an
+arithmetic coder reaches that within a few bytes per image, so the coder itself is out of scope.
 
 ## Summary
 
-- **Binary alpha is common.** Of the 12,214 distinct images with transparency found on this
-  machine, 15 % (1,782) use exactly two alpha values. Half of those are GIFs.
-- **In practice it is usually redundant with colour.** 94 % of the binary-alpha images have one
-  single colour under every transparent pixel, and 70 % are an exact *colour key*: alpha is a
-  function of colour, so it costs zero bits once colour is known.
-- **A pure context model already beats the existing formats on the mask alone.** CTW over the
-  24 nearest neighbours (exact ideal costs) codes the 1,527 measured masks in 133 KB in total,
-  against 241 KB for JPEG XL and 229 KB for WebP. It is smaller than JPEG XL on every single
-  image, and smaller than all four baselines on 98 % of them. On synthetic shapes and dithering
-  it is 1.3–4.9× smaller than JPEG XL.
-- **It loses on repeated content**: text, sprite sheets and tiled textures, where LZ77, patches
-  and intra block copy win. A match model is therefore mandatory. Detecting nearest-neighbour
-  upscaling makes upscaled pixel art another 2.5× smaller.
-- **Alpha and colour should be coded jointly.** The proposal is to code colour (YCoCg) first and
-  alpha last, with a colour-key mode and colour-derived context bits. On the 1,527 images this
-  costs 55 KB for all the alpha, against the 108 KB (WebP) and 156 KB (JPEG XL) that those codecs
-  add when they code the full RGBA image losslessly.
-- **The largest remaining headroom is on edges.** On synthetic polygon and ellipse masks CTW
-  spends 0.86–1.0 bits per boundary pixel, while the theory of digital straight segments allows
-  about 0.2 on long straight edges. An edge model is the next thing to measure.
+- **What's measured:** 2,130 binary masks from four kinds of real assets. These are pixel art,
+  icon-font glyphs rendered without anti-aliasing, app icons and GIFs from this machine, and
+  vector shapes. The vector shapes come from the QOI benchmark suite's icons, cutouts and plants,
+  thresholded at 50 % coverage.
+- **Where the bits go:** 96 % of pixels are flat and cost almost nothing. Nearly half of all
+  bits are spent on *staircase steps*, the pixels where an edge moves sideways.
+- **The proposed predictor** adds two small, side-information-free models to the context of a
+  CTW model:
+  - a **line predictor** that follows each edge upward and predicts its next step from the
+    digital-straight-line pattern;
+  - a **match predictor** that copies what followed the same 48-pixel neighbourhood last time.
+- **Result:** 8.4 % smaller in total than the previous plan, and smaller in every category:
+  −23 % on icons, −13 % on app/cache images, −11 % on cutouts, −8 % on glyphs, −6.5 % on
+  pixel art. Against JPEG XL (lossless, effort 9, mask coded on its own) it is 1.8× smaller
+  in total and smaller on every one of the 2,130 masks.
+- **What's stored:** only the two alpha values. No mode flags, tables, offsets, colour keys or
+  encoder choices. The decoder infers everything from pixels it already has.
+- **Checked end to end:** a pixel-by-pixel decoder simulation reproduces the measured cost
+  exactly, so the predictor is causal (decodable) and the numbers aren't an artefact.
 
-## 1. Scope and decisions
+## 1. Corpus
 
-| Decision | Choice |
+Binary alpha means exactly two alpha values. Downloaded sets are git-ignored (`corpus/`) and the
+file lists of private images never leave the machine.
+
+| Category | Source | Masks | Notes |
+|---|---|---|---|
+| `pixelart` | Kenney CC0 packs: 1-Bit, Pixel Platformer, Tiny Dungeon, Micro Roguelike, Pixel Shmup, Pixel UI | 369 | Sprites, tiles and tile sheets |
+| `glyphs` | Material Icons, Font Awesome solid + regular, rendered without anti-aliasing at 24, 64 and 192 px | 400 of 1,960 | Clean vector cutouts. Colour carries no information |
+| `system` | `C:\Windows`, `Program Files` | 400 of 1,417 | Application icons, GIFs |
+| `user` | `C:\Users\<user>` (app data, browser caches) | 378 of 715 | Real-world web and app images |
+| `icons_thr` | QOI suite `icon_64`, `icon_512`, alpha ≥ 128 | 380 | Derived (see below) |
+| `cutouts_thr` | QOI suite `pngimg` (product cutouts), alpha ≥ 128 | 141 | Derived, up to 2.1 Mpx |
+| `plants_thr` | QOI suite `textures_plants`, alpha ≥ 128 | 54 | Derived, alpha-tested foliage |
+| `misc` | the 9 truly binary QOI images | 8 | |
+
+How common binary alpha is: of the 21,919 distinct images with transparency on this machine, 2,221
+(10 %) are binary. The QOI benchmark suite has almost none: its icons, cutouts and textures use
+anti-aliased alpha. That's why the `*_thr` categories exist. Thresholding coverage-based alpha at
+50 % gives, for straight edges, about the same pixels as rasterising the same vector shape
+without anti-aliasing. They are labelled *derived* everywhere.
+
+Images per category are capped at 400, chosen by hash. "Category-balanced" averages the
+per-category ratios, so the many small icons don't hide the large shapes or the other way round.
+
+## 2. Where the bits go
+
+The per-pixel cost of an adaptive 16-neighbour model, split by the pixel's 3×3 geometry (analysis
+only, `where_bits.py`):
+
+| Geometry | Share of pixels | Share of bits | Bits per pixel |
+|---|---|---|---|
+| Flat (all 8 neighbours equal) | 96.5 % | 12 % | 0.002 |
+| Straight horizontal / vertical edge | 1.4 % | 13 % | 0.14 / 0.22 |
+| Diagonal step | 0.6 % | 11 % | 0.36 |
+| Staircase corner (the edge moves) | 0.7 % | **46 %** | 1.29 |
+| 1-px lines and spikes | 0.2 % | 11 % | 1.08 |
+| Isolated pixels | 0.01 % | 2 % | 3.99 |
+
+So the question that decides the size is: **where does the edge step next?** That's what the
+line predictor is for. In pixel art the bits are spread more evenly (lines 27 %, corners 29 %,
+diagonals 16 %), which is where repetition (the match predictor) helps.
+
+## 3. The predictor
+
+Pixels are coded in raster order. Pixels outside the image read as 0. The probability comes from
+CTW (context-tree weighting) over a context of 30 bits, in this order:
+
+```
+ 2 nearest neighbours          W, N
+ 4 line-predictor bits         here, past, near, certain
+ 2 match-predictor bits        exists, value
+22 further neighbours          nearest first (Euclidean distance, ties: left, then up)
+```
+
+CTW weighs every context depth from 0 to 30 at once, so small images use short contexts and large
+images use long ones, with nothing to tune. Every node uses the Dirichlet estimator with α = 1/4:
+p(1) = (n₁ + ¼) / (n₀ + n₁ + ½).
+
+### 3.1 Line predictor (edges)
+
+Every row has a list of **transitions**: position 0 with the row's first value, every x where the
+value changes, and the row end W. Each transition is linked to the nearest transition of the same
+kind (0→1, 1→0, or end) in the row above, which chains transitions into **edge tracks**.
+
+While decoding pixel (y, x):
+
+1. The current run in row y started at s, the last transition before x.
+2. s is linked to its counterpart in row y − 1. The *next* transition in row y − 1 is where that
+   run ended one row up. Its track gives the steps Δ (horizontal moves per row) of the last 24
+   rows.
+3. A straight digital edge only ever steps by two neighbouring amounts, a and a + 1. One of them
+   is isolated, and the runs of the other are L or L + 1 long. So the next step is predicted as:
+
+| Situation | Prediction | Certain |
+|---|---|---|
+| The isolated step was just taken | the other step | yes |
+| Current run of the frequent step is shorter than any complete run | same step | yes |
+| Current run is as long as the longest complete run | the other step | yes (if runs differ by ≤ 1) |
+| Only one step value seen, or not a straight line (curve, corner) | same step | no |
+
+4. E = the edge's position in row y − 1 plus the predicted step. The four bits are:
+   **here** = (x = E), **past** = (x > E), **near** = (|x − E| = 1), and **certain**.
+
+The tracker keeps no state of its own: it only reads rows that are already decoded.
+
+### 3.2 Match predictor (repetition)
+
+The 48 nearest causal neighbours form a key. The decoder keeps a table *key → value of the pixel
+that followed this key most recently*. The two bits are **exists** (the key was seen before) and
+**value**. This copies repeated tiles, sprites, glyph parts and dither patterns without stored
+offsets, like LZ77 but per pixel. In a real decoder the table is a fixed-size hash table; the
+measurement uses exact keys, and collisions in a reasonably sized table cost very little.
+
+### 3.3 What is stored
+
+| Field | Size |
 |---|---|
-| Constant alpha | Header only (mode + value), zero payload |
-| Binary alpha | Dedicated coding path, optimised purely for size |
-| "Lossless" | Includes the colour under alpha = 0. Encoder tricks that rewrite invisible colour (WebP's default, FLIF's `alpha_zero`, `oxipng --alpha`, `zopflipng --lossy_transparent`) are therefore **not** allowed |
-| Colour space | YCoCg for the colour channels (§6 covers how alpha interacts with it) |
+| The two alpha values (lo, hi) | 2 × bit depth |
+| Arithmetic-coded pixels | — |
 
-## 2. Theory
+Nothing else. In particular, these items from v2 are **dropped**:
 
-1. **Size = model.** Every decodable code implicitly defines a probability distribution
-   (Kraft inequality), and an arithmetic coder gets within a few bytes of −log₂ P(data). Every
-   "representation" (quadtree, RLE, chain code, polygons) is an implicit model, so the design
-   problem is building the best sequential predictor.
-2. **Flat regions are nearly free.** An adaptive estimator in a context that only ever sees one
-   value spends about ½·log₂ n + 1 bits on n pixels (Krichevsky–Trofimov), so 10⁶ transparent
-   pixels cost about 11 bits. The information is on the boundary.
-3. **Edges cost what their predictability says.** A simple edge crossing a scanline moves left,
-   stays or moves right (≤ log₂ 3 ≈ 1.58 bits per crossing). Contexts that see the edge's slope
-   and curvature cost far less. The figure of merit is **bits per boundary pixel**.
-4. **Learning costs bits (regret).** Every context used pays about ½·log₂ n bits to learn its
-   probability. Bigger templates predict better but have more contexts to learn. Measured below:
-   on random noise a static 16-pixel "oracle" model appears to reach 0.38 bpp, while every adaptive
-   model correctly costs 1.0 bpp. That gap is pure learning cost.
-5. **Order is free in theory.** By the chain rule, H(A, C) = H(A) + H(C | A) = H(C) + H(A | C)
-   for alpha A and colour C, so coding alpha or colour first gives the same ideal total. In practice
-   the order decides which conditional model you have to build, and one of them is much easier (§6).
-6. **Adaptive costs can be computed exactly without a coder.** The KT/Dirichlet estimator, and CTW
-   built on it, give a sequence probability that depends only on the final counts per context. So
-   the cost of coding an image adaptively, pixel by pixel, follows exactly from counts, and that's
-   what the measurements in §5 use. Mixing models (PAQ-style) need a sequential simulation instead.
+| v2 element | Why it's gone |
+|---|---|
+| Colour-key mode and colour context bits | Colour is a separate decision for when the YCoCg coder exists. The predictor has to be strong on its own: the glyph set has no colour information at all |
+| Encoder-chosen context order, AT pixels, transpose, repeat offsets, dither period, upscale factor | Side information and spec complexity. CTW + match cover most of what they were for |
+| Mixer + SSE stage | One CTW over a well-ordered context does the job and is easier to specify |
+| Raw fallback mode | CTW's worst-case overhead on random data is a few bytes |
+| A trained starting table in the spec | Measured: only 1.2 % on top of CTW (§4.3). Not worth a 4,096-entry table in the spec |
 
-Two engineering consequences:
+## 4. Measurements
 
-- **Probability precision.** Clamping probabilities at 12 bits costs at least
-  −log₂(1 − 2⁻¹²) ≈ 3.5·10⁻⁴ bits on every pixel, about 365 bytes on a 4K mask. At 16 bits the
-  floor is about 23 bytes. Use ≥ 16-bit probabilities, and aim for 24.
-- **Prefix (Huffman) codes have a 1-bit-per-symbol floor**, which is why PNG and WebP need runs,
-  LZ77 or pixel bundling to make binary planes cheap. An adaptive binary arithmetic coder has no
-  such floor.
+Exact ideal code lengths (`harness.py`, from per-context counts). Bytes, totals per category, and
+the ratio to the v2 plan (CTW over 24 neighbours, α = 1/16).
 
-## 3. How existing formats store binary alpha
+### 4.1 The predictor, full set (2,130 masks)
+
+| Category | Masks | v2 plan | + α = 1/4 | + line | + match | **+ line + match** |
+|---|---|---|---|---|---|---|
+| cutouts_thr | 141 | 90,738 | 0.995 | 0.909 | 0.962 | **0.894** |
+| glyphs | 400 | 29,200 | 0.989 | 0.936 | 1.005 | **0.916** |
+| icons_thr | 380 | 38,978 | 0.998 | 0.813 | 0.925 | **0.771** |
+| misc | 8 | 9,750 | 0.992 | 0.980 | 0.990 | **0.984** |
+| pixelart | 369 | 69,616 | 0.978 | 0.979 | 0.933 | **0.935** |
+| plants_thr | 54 | 173,200 | 0.993 | 0.957 | 0.981 | **0.957** |
+| system | 400 | 15,395 | 0.984 | 1.010 | 0.972 | **0.994** |
+| user | 378 | 58,676 | 0.995 | 0.973 | 0.875 | **0.870** |
+| **All** | 2,130 | 485,553 | 0.991 | 0.943 | 0.954 | **0.916** |
+| Category-balanced | | | 0.990 | 0.945 | 0.955 | **0.915** |
+
+The two predictors are complementary: the line predictor works on shapes (icons, cutouts, glyphs),
+and the match predictor on repetition (pixel art, app and web images).
+
+### 4.1b Against existing formats
+
+The same masks coded on their own as 1-bit images. Our sizes are ideal costs plus a 4-byte
+allowance per image for the alpha header. The codecs' sizes include their own container, which
+matters for the smallest icons.
+
+| Category | Masks | New predictor | JPEG XL e9 | WebP | PNG | JXL / new | New smaller than JXL |
+|---|---|---|---|---|---|---|---|
+| cutouts_thr | 141 | 81,701 | 178,419 | 262,970 | 436,702 | 2.18 | 141/141 |
+| glyphs | 400 | 28,351 | 59,661 | 83,782 | 141,032 | 2.10 | 400/400 |
+| icons_thr | 380 | 31,567 | 89,354 | 132,886 | 263,007 | 2.83 | 380/380 |
+| misc | 8 | 9,626 | 13,903 | 21,882 | 31,007 | 1.44 | 8/8 |
+| pixelart | 369 | 66,568 | 98,278 | 97,782 | 124,171 | 1.48 | 369/369 |
+| plants_thr | 54 | 165,932 | 251,590 | 433,314 | 607,259 | 1.52 | 54/54 |
+| system | 400 | 16,904 | 36,241 | 42,658 | 68,976 | 2.14 | 400/400 |
+| user | 378 | 52,552 | 104,015 | 88,062 | 129,098 | 1.98 | 378/378 |
+| **All** | 2,130 | **453,201** | 831,461 | 1,163,336 | 1,801,252 | **1.83** | **2,130/2,130** |
+
+Pixel art is the closest race: there WebP's LZ77 is as good as JPEG XL, because tile sheets repeat.
+
+### 4.2 Synthetic shapes: how close to the theory
+
+Bits per boundary pixel (pairs of differing 4-neighbours), CTW over 24 neighbours:
+
+| Mask | v2 plan | + edge step = last step | + line predictor |
+|---|---|---|---|
+| Random polygons, 1024² | 0.86 | 0.62 | **0.41** |
+| Rotated ellipse, 1024² | 0.99 | 0.74 | **0.60** |
+| Organic blobs, 1024² | 1.16 | 1.17 | 1.18 |
+
+A digital straight segment of length n is one of about n³/π² possibilities (Mignosi's count of
+Sturmian factors), so long straight edges need only ~0.2 bits per boundary pixel. The line
+predictor halves the cost on polygons and gets about halfway to that bound. Irregular blobs gain
+nothing, as expected: their edges carry real information.
+
+### 4.3 Things that were measured and rejected
+
+| Idea | Result | Verdict |
+|---|---|---|
+| Bigger neighbourhood (32 or 48 neighbours instead of 24) | −1 to −2 %, mostly on large shapes | The match predictor gets the long-range benefit more cheaply |
+| Trained starting table (prior) for CTW, 12 or 16 bits | −1.2 % held out (−0.8 % with 16 bits) | Not worth a table in the spec |
+| Same, for a plain 16-pixel model without CTW | −12 % | Shows CTW already solves most of the learning cost on small images |
+| Edge step from more history, averaged (k = 4, 8 rows) | worse than the last step | The run-length (Sturmian) rule replaces it |
+| Match key of 80 or 120 neighbours | worse than 48 on small images | 48 kept |
+| Feature bits first in the context (before W, N) | 0.4–0.8 % worse | after 2 neighbours |
+| α = 1/32, 1/16, 1/8, 1/2 | 1/4 is best, with and without the new bits (−1 % on the v2 model too) | α = 1/4 |
+
+### 4.4 Verification
+
+`simulate_decoder.py` decodes masks pixel by pixel. At each pixel it zeroes everything not yet
+decoded, recomputes all feature bits from that partial image, and runs a plain sequential CTW.
+On glyph, pixel-art, app-icon and cache images the total matches the count-based number to
+10⁻⁴ bits. `harness.check_causal` also tests every feature by replacing all future pixels
+(random, all 0, all 1, inverted, from random positions and row starts) and requiring identical
+feature values up to that point.
+
+## 5. Ideas from other sources, for binary alpha
+
+| Idea | Verdict for a 1-bit mask |
+|---|---|
+| Context modelling with a 2D neighbourhood + arithmetic coding | The core of this design |
+| "Predict the predictor" (choose a model per region) | CTW does this per context, implicitly and without side information |
+| Chain codes / polygon outlines | Their strength (an edge's direction memory) is now inside the line predictor, while raster order keeps blobs, dither and 1-px detail cheap |
+| Quadtree, blocks (fixed or variable) | No gain: flat areas are already ~0.002 bits per pixel. Point-cloud research shows the decomposition matters less than the context model |
+| Hilbert or zigzag scan order | Same total in theory (chain rule). Raster order gives the most decoded neighbours above and to the left, and the edge tracker relies on whole rows |
+| Anchor points + diffusion, graphs, wavelets, GSP transforms | Made for many-valued pixels. A 1-bit mask has no residuals to shrink |
+| MED / LOCO-I / Paeth, YCoCg, palette sorting, BWT/MTF | For the colour channels, not the mask |
+| Colour correlation | Real, but a separate decision once colour coding exists (v2, §6 in git history) |
+
+## 6. Next steps
+
+1. **Fixed-point, bounded CTW.** Integer counts, a fixed-size node table, and a specified hash for
+   the match table. Measure the loss against the ideal numbers here.
+2. **Better lines on curves.** Ellipses still cost 0.6 bits per boundary pixel, and the bound is
+   much lower. Try a second-order rule (the run lengths of the run lengths) or a curvature step.
+3. **Corners and shape starts.** Track births and deaths (where a shape begins or ends in a row)
+   are not predicted yet.
+4. **Speed.** Everything here is Python research code. The decoder's work per pixel is one CTW
+   update of depth 30, a hash lookup, and a few comparisons.
+
+## Appendix A. How existing formats store binary alpha
 
 | Format | Representation of binary alpha | Coding | Colour under transparent pixels |
 |---|---|---|---|
@@ -88,16 +264,16 @@ Observations:
 
 - **Colour keys are the classic binary-alpha encoding** (GIF, PNG tRNS, GPU punch-through).
   They are exactly lossless when every transparent pixel has the key colour and no opaque pixel
-  does. That's the most common real-world case (§5.3).
+  does. They were the most common case on this machine (v2).
 - **Only FLIF and JPEG XL model alpha jointly with colour.** FLIF codes alpha first and uses it
   as context for colour. JPEG XL codes colour first and lets the alpha MA tree split on
   previous-channel values. Neither has a dedicated binary model or a colour-key mode.
 - **No format uses an adaptive *binary* model with large contexts** (CTW, mixing, free trees)
   for alpha. The closest are FLIF's MANIAC (adaptive, but it binarises integers) and JBIG2 in PDF.
 
-## 4. Binary image coding: the literature
+## Appendix B. Binary image coding: the literature
 
-### 4.1 Pixel-context coders (the core)
+### B.1 Pixel-context coders (the core)
 
 | Work | Idea | Result |
 |---|---|---|
@@ -109,7 +285,7 @@ Observations:
 | Per-image context selection (Ramalho & Peixoto 2020) | Choose the best context pixels per image, signal them in 16 bits | Beats fixed templates, more so on point-cloud slices ([SBrT](https://biblioteca.sbrt.org.br/articles/2280)) |
 | Sparse binary masks (Mohideen, Peter & Weickert 2020) | Systematic comparison incl. PAQ variants | DjVu best of the standard codecs. Logistic mixing of 12 nested contexts (BPAQ-2D-L) best overall. A second SSE stage *hurt* on binary data ([arXiv 2010.13634](https://arxiv.org/pdf/2010.13634)) |
 
-### 4.2 Contour coders (chain codes, vertices)
+### B.2 Contour coders (chain codes, vertices)
 
 - Chain codes (3OT, AF8) beat JBIG on irregular shapes: about 29 % on average in one study,
   and in over 85 % of cases in another ([SPIE 2005](https://opticalengineering.spiedigitallibrary.org/journals/optical-engineering/volume-44/issue-09/097004/Compressing-bilevel-images-by-means-of-a-three-bit-chain/10.1117/1.2052793.full),
@@ -121,13 +297,13 @@ Observations:
   intra CAE ([paper](https://www.datalearner.com/academic/journal-papers/0923-5965/volumes-and-issues/61/paper-detail/102913)).
 
 **Interpretation.** Contour coders win against *weak* pixel models (JBIG's 10-pixel template),
-by roughly the same margin that CTW wins over a JBIG-like template in §5 (10–34 %). Nobody has
+by roughly the same margin that CTW wins over a JBIG-like template (10–34 %, v2). Nobody has
 compared them with CTW- or mixing-class pixel models. What contour coders exploit is long-range
 direction memory along the boundary, which a small raster template cannot see. That's a
 reason to feed an **edge-geometry model** into the mixer, not to switch to contours, since
 contours fail on fragmented and dithered masks.
 
-### 4.3 Hierarchical / occupancy coding
+### B.3 Hierarchical / occupancy coding
 
 Point-cloud geometry is binary occupancy, coded as octrees (the 3D quadtree) or as bilevel
 slices. Both become competitive only when each occupancy bit is coded with rich neighbour
@@ -136,14 +312,14 @@ octree contexts save up to 30 % over MPEG G-PCC ([UnB summary](https://repositor
 [arXiv 2104.09859](https://arxiv.org/pdf/2104.09859)). The lesson for quadtrees: the
 decomposition doesn't matter much, the context model does.
 
-### 4.4 Learned coders
+### B.4 Learned coders
 
 No learned lossless coder for binary masks or alpha was found that beats classic context
 modelling on images. A 2024 dictionary method is preliminary and loses to JBIG2 on several
 images ([arXiv 2406.03087](https://arxiv.org/html/2406.03087v1)). Learned models need training
 data and a large decoder, so they are out of scope.
 
-### 4.5 Probability estimation and mixing
+### B.5 Probability estimation and mixing
 
 - CTW (1995) is still the principled answer to the template-size problem. Context Tree
   Switching (2012) and Partition Tree Weighting (2013) extend it while keeping its guarantees
@@ -154,254 +330,3 @@ data and a large decoder, so they are out of scope.
   averages them ([MPU papers](https://research.mpu.edu.mo/en/publications/using-four-hypothesis-probability-estimators-for-cabac-in-versati-2/)):
   multi-rate estimation is standard practice.
 
-## 5. Measurements
-
-### 5.1 Method
-
-- **Ideal costs** use `idealcost.py`: exact adaptive code lengths of a fixed template with a KT
-  estimator (KT-10 ≈ JBIG, KT-16 ≈ JBIG2 generic), and of **CTW over the 24 nearest causal
-  neighbours** (ordered by distance, Dirichlet α = 1/16). Our numbers include a 4-byte header
-  allowance. Real coders add a few bytes on top.
-- **Baselines** code the mask on its own as a greyscale image: JPEG XL lossless 1-bit (effort 9,
-  and 10 up to 1.1 Mpx; the smaller of the two per image, since effort 10 was often *worse* on
-  small images), WebP lossless (method 6, exact), PNG 1-bit (optimised), AVIF lossless (speed 4).
-  All through Pillow / `imagecodecs`.
-- **Joint coding** is measured as RGBA size − RGB size for JPEG XL (effort 9) and WebP (exact):
-  what alpha adds when the codec can also use colour.
-- **Container overhead** is large for small images (AVIF especially). The payload table
-  subtracts each codec's size for an all-opaque mask of the same dimensions.
-
-### 5.2 Synthetic masks
-
-Bytes. CTW-24 includes the 4-byte header allowance. JXL = the better of effort 9 and 10.
-
-| Mask | Size | Boundary px | CTW-24 | KT-10 (≈ JBIG) | KT-16 (≈ JBIG2) | JPEG XL | WebP | PNG | AVIF | JXL / CTW |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Rotated ellipse | 1024² | 2,740 | **343** | 422 | 408 | 764 | 1,430 | 3,017 | 7,666 | 2.23 |
-| Random polygons | 1024² | 8,186 | **880** | 1,193 | 1,135 | 1,566 | 2,986 | 6,509 | 2,096 | 1.78 |
-| Organic blobs | 1024² | 23,959 | **3,475** | 3,874 | 4,017 | 4,413 | 7,062 | 9,792 | 5,770 | 1.27 |
-| Floyd–Steinberg dither | 512² | 186,474 | **8,241** | 12,462 | 9,578 | 14,456 | 15,854 | 21,795 | 17,472 | 1.75 |
-| Bayer (ordered) dither | 512² | 215,400 | **1,113** | 10,981 | 6,188 | 5,450 | 1,742 | 2,134 | 6,372 | 4.89 |
-| Text (repeated glyphs) | 1024×512 | 64,824 | 4,969 | 8,346 | 6,591 | **1,430** | 8,130 | 11,117 | 4,280 | 0.29 |
-| Sprite sheet (32² tiles) | 512² | 30,400 | 2,219 | 4,140 | 3,466 | 3,063 | 2,372 | 2,641 | **1,618** | 1.38 |
-| Pixel art, 8× upscaled | 512² | 6,728 | 426 | 438 | 456 | 549 | **394** | 740 | 908 | 1.29 |
-| Random noise | 256² | 65,322 | **8,197** | 8,526 | 8,818 | 8,229 | 8,258 | 8,516 | 8,552 | 1.00 |
-
-What this shows:
-
-- **CTW beats JPEG XL by 1.3–2.2× on smooth shapes, blobs and error-diffusion dither**, and by
-  4.9× on ordered (Bayer) dither, where the period fits inside the 24-pixel context.
-- **CTW solves the template-size problem.** A bigger fixed template is not automatically better:
-  on a 512² disc, KT-16 costs 242 bytes and KT-24 costs 263 (learning cost), while CTW-24 costs
-  206. CTW-24 is smaller than both fixed templates on every mask in the table.
-- **Repeated content beats pure context models.** On the text mask, which reuses the same glyphs
-  everywhere, JPEG XL (LZ77/patches) is 3.5× smaller than CTW. On the sprite sheet, AVIF (likely
-  palette + intra block copy) and WebP (LZ77) win. A match model is mandatory.
-- **Upscaled pixel art needs a transform.** The 8× nearest-neighbour upscale costs 426 bytes with
-  CTW. Detecting the factor and coding the 64×64 original costs about 170 bytes, against 394 for
-  WebP, the best baseline.
-- **Straight edges have large headroom.** CTW spends 0.86 bits per boundary pixel on the polygon
-  mask (1.0 on the ellipse), because a 24-pixel context sees only about 3 pixels of edge. But a
-  digital straight segment of length n is one of about n³/π² possibilities: Mignosi's count of
-  Sturmian factors, 1 + Σᵢ (n − i + 1)·φ(i) ([proof note](https://www.di.ens.fr/reports/1992/liens-92-21.A4.pdf)).
-  It therefore carries only log₂(n³/π²) ≈ 17 bits for n = 100, about 0.17 bits per pixel. An
-  edge model that follows the segment (input E in §7.2) could cut edge costs by up to ~5× on
-  shape masks.
-- **Noise** costs 1.0 bpp everywhere, as it must. The raw fallback covers it.
-
-### 5.3 Real binary-alpha images
-
-**Corpus.** `scan_alpha.py` walked `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`
-and the per-user installed programs folder: 68,410 PNG/GIF files. Personal folders (documents,
-pictures, downloads, browser caches) were not scanned, and no image leaves the machine. After removing duplicate pixel data, 12,214 images had transparency:
-
-| Alpha | Images | Share |
-|---|---|---|
-| Constant | 1,020 | 8 % |
-| **Binary** | **1,782** | **15 %** |
-| General (> 2 values) | 9,412 | 77 % |
-
-Of the binary-alpha images, 888 are GIFs and 894 PNGs. 1,697 use 0/255, 21 use 254/255
-(near-opaque noise), and the rest use other pairs. Under the transparent pixels, 94 % have one
-single colour (most often #818181, white, black, #C0C0C0, #FF00FF) and 70 % are an exact colour
-key. Most are application UI icons (MATLAB, Granta EduPack, Office). The 1,527 with both sides
-≥ 16 px were measured: median 44×44 px, and 420 at least 128×128.
-
-**Totals in bytes.** "Best of both" picks, per image, CTW with or without the colour bits
-(1 bit to signal) and uses key mode where it applies. All our columns include the 4-byte header.
-
-| Set | Images | CTW-24, alpha only | CTW-24 + colour bits | Best of both + key mode | JPEG XL (mask) | WebP (mask) | PNG | AVIF | JPEG XL RGBA − RGB | WebP RGBA − RGB |
-|---|---|---|---|---|---|---|---|---|---|---|
-| All | 1,527 | 133,484 | 61,319 | **55,095** | 241,075 | 228,864 | 355,878 | 715,693 | 156,034 | 107,650 |
-| ≥ 128×128 | 420 | 95,076 | 54,292 | **48,640** | 158,567 | 129,832 | 204,122 | 349,920 | 128,667 | 100,448 |
-| < 128×128 | 1,107 | 38,408 | 7,027 | **6,455** | 82,508 | 99,032 | 151,756 | 365,773 | 27,367 | 7,202 |
-| No colour key | 454 | 62,834 | 56,233 | **50,803** | 108,686 | 77,150 | 115,643 | 275,240 | 106,760 | 101,760 |
-
-Payload only (container overhead subtracted, see §5.1): JPEG XL e9 192,989, WebP 177,764,
-PNG 208,475, AVIF 267,113, against **127,376** for alpha-only CTW-24 without a header.
-
-What this shows:
-
-1. **The mask alone:** CTW-24 is smaller than JPEG XL on all 1,527 images, and smaller than
-   every baseline on 1,493 (98 %). In total it's 1.8× smaller than JPEG XL and 1.7× smaller than
-   WebP (1.5× and 1.4× on payload only). AVIF is far behind on these mostly small images.
-2. **All 34 exceptions are WebP wins on repeated content.** Animation sprite sheets (4800×96
-   frame strips: WebP 148 bytes vs CTW 1,235), and a 254/255 noise texture that repeats
-   horizontally every 256 pixels (96 % of pixels match at that offset): WebP 10.2 KB vs CTW
-   20.1 KB. LZ77 catches both. A match model, or a context pixel at the encoder-detected repeat
-   offset, would too.
-3. **Real masks are easier than the synthetic ones.** On images ≥ 128×128 with more than 200
-   boundary pixels, CTW spends a median 0.11 bits per boundary pixel (axis-aligned UI shapes),
-   with a 90th percentile of 1.46.
-4. **Colour halves the cost.** Colour-aware contexts take the total from 133 KB to 61 KB.
-   Choosing the order per image plus key mode gives 55 KB, against 108 KB (WebP) and 156 KB
-   (JPEG XL) for those codecs' own joint coding.
-5. **The joint-coding baselines are noisy per image.** Encoders change their choices when alpha
-   is present: WebP's RGBA file was *smaller* than its RGB-only file for 216 images (−18 KB in
-   total), and JPEG XL's for 119 (−6 KB). That noise favours the baselines in the totals. Per
-   image, our cost ties with or beats WebP's marginal cost on 797 of 1,527 images (52 %). Of the
-   730 losses, 435 are images where WebP's RGBA file was no bigger than its RGB file, and 597 are
-   within 8 bytes, where our 4-byte header allowance decides. All losses together add up to
-   22 KB, against 75 KB of wins.
-6. **A fixed CTW bit order can hurt.** Putting the 3 colour bits first made 65 of the 454
-   non-key images worse (worst case +26 %, the noise texture). CTW can only skip an uninformative
-   first bit by falling back to no context at all. Mixing (or choosing between) both orders
-   fixes this: the per-image choice already brings the non-key total from 56,233 to 50,803.
-
-## 6. Alpha and colour
-
-### 6.1 What can be exploited
-
-1. **Exact colour key** (alpha = 1 exactly when colour ≠ key): alpha costs 0 bits given colour.
-   This is GIF/PNG-tRNS semantics, detected by the encoder and signalled with one flag + the key.
-2. **Partial key** (all transparent pixels share a colour, but some opaque pixels have it too):
-   alpha is only uncertain on key-coloured pixels. A context bit "colour == key" makes every
-   other pixel free.
-3. **Edge alignment**: alpha boundaries coincide with colour boundaries. Context bits such as
-   "colour equals the west / north neighbour's colour" carry this.
-
-### 6.2 Which order
-
-- **Colour first, alpha last (proposed).** The alpha coder sees the decoded YCoCg values, so
-  1–3 are simple context bits, and the colour-key case is exactly free. The colour coder doesn't
-  see alpha, but because invisible colour is kept, alpha would mainly help the colour coder at
-  edges, which is the same shared information (chain rule).
-- **Alpha first (FLIF).** The colour coder must learn that transparent pixels have the key colour,
-  which is cheap but not free, and the colour-key case still pays the full alpha cost.
-- The keyed comparison is in YCoCg space without loss of generality, because the colour transform
-  is a bijection.
-
-### 6.3 Measured
-
-- **Exact colour key:** 70 % of the measured binary-alpha images (1,073 of 1,527). Alpha costs
-  0 bits plus the key in the header.
-- **Colour-aware contexts** (colour == key, == west, == north) halve the total alpha cost
-  (133 KB → 61 KB). On non-key images they save 10 % in total, with a median per-image ratio
-  of 0.56.
-- **Per-image order choice + key mode:** 55 KB, against 156 KB that JPEG XL adds for alpha
-  inside its own joint RGBA coding, and 108 KB for WebP.
-
-### 6.4 Proposed decision
-
-1. **Code colour (YCoCg) first and alpha last.** The alpha model gets the decoded colour.
-2. **Key mode** in the header: one flag + the key triple, no alpha payload.
-3. **Colour bits as inputs to the mixer** (an alpha-only CTW and a colour-first CTW mixed),
-   not forced into one fixed order (§5.3, point 6).
-4. **Don't use alpha as context for colour** (FLIF style) for now. Revisit once the YCoCg coder
-   exists, since that's the only way to measure the alpha-first gain.
-
-## 7. Revised design
-
-### 7.1 Pipeline
-
-```
-colour (YCoCg) decoded ──► alpha mode?
-   constant ─► value from header
-   key      ─► alpha = (colour != key) ? hi : lo           (0 payload bits)
-   coded    ─► per pixel: model inputs ─► mixer ─► p(1) ─► binary arithmetic decoder
-   raw      ─► W·H bits                                     (guarantee: ≤ 1 bpp)
-```
-
-### 7.2 Model inputs (in order of measured or expected value)
-
-| # | Input | Evidence |
-|---|---|---|
-| A | CTW (later CTS) over the nearest causal neighbours, depth ≈ 24 | Smaller than JPEG XL on all 1,527 real masks, and smaller than both fixed templates on every synthetic one (§5) |
-| B | Colour-first CTW: the same neighbours, preceded by colour == key, colour == W, colour == N | Halves the real-image total (§5.3). Kept as a *separate* model next to A, because forcing the colour bits first hurt 65 of 454 images |
-| C | 2D match model (hash of a large context → last occurrence → predicted pixel) | Required: all 34 real images where CTW lost, and the text/sprite synthetic masks, are repeated content (§5.2, §5.3) |
-| D | Small/medium fixed templates (orders 4–16) | Fast learners for small images, standard mixer inputs |
-| E | Edge-geometry model (follows the boundary's digital straight segment / curvature) | Up to ~5× headroom on straight edges (digital straight segment bound, §5.2). Contour coders beat weak templates (§4.2) |
-| F | Offset contexts at encoder-detected periods (dither, tiled textures) | Bayer dither 4.9× smaller than JPEG XL even without it. The 254/255 texture repeats at 256 px, far outside any template (§5.3) |
-
-Combined by **logistic mixing** with weight sets selected by a small context. One SSE/APM stage
-at most (the sparse-mask study found a second one harmful on binary data). Counters:
-Dirichlet α = 1/16 was 2 % better than KT (α = ½) in total on real masks, but KT won on half the
-images and on error-diffusion dither. So mix both, or adapt the rate per context (two-rate
-estimators as in VVC).
-
-### 7.3 Encoder-side search (signalled in a few bytes)
-
-| Parameter | How it's chosen |
-|---|---|
-| Alpha mode (key / coded / raw) | Exact check for the key. Raw if the coded size > W·H bits |
-| Nearest-neighbour upscale factor (x, y) | Exact check. Code the downscaled mask |
-| Transpose | Ideal cost on a subsample |
-| Context order / AT pixels | Greedy, as in free tree / per-image context selection (§4.1) |
-| Repeat offsets (dither period, tiled texture) | Autocorrelation peaks of the mask, e.g. (0, 256) for the noise texture in §5.3 |
-
-### 7.4 Coder
-
-Binary range coder, 32-bit range, probabilities ≥ 16 bits (aim for 24), and **all model
-arithmetic in fixed-point integers** so every decoder reproduces every probability bit-exactly.
-
-### 7.5 Bitstream sketch
-
-```
-alpha_mode        2 bits   0 none · 1 constant · 2 binary · 3 general
--- if binary:
-value_lo, value_hi         bit depth each
-binary_mode       2 bits   0 key · 1 coded · 2 raw
-key               3 × bit depth    (YCoCg triple, key mode only)
-upscale           flag (+ factors)
-transpose         1 bit
-context_order     preset id or explicit offsets
-repeat_offsets    optional list of (dy, dx)
-payload           arithmetic-coded (coded mode) / packed bits (raw mode)
-```
-
-## 8. Milestones
-
-| M | Deliverable | Status |
-|---|---|---|
-| M0 | Baselines (JXL, WebP, PNG, AVIF) on a corpus | Done for synthetic + locally found images (§5). A public corpus is still needed |
-| M1 | Exact ideal-cost harness (KT, CTW) | Done (`research/alpha_binary`) |
-| M2 | Colour-key and partial-key handling | Measured in §5.3. Implement detection |
-| M3 | Sequential simulation for models that can't be computed from counts (match model, edge model, mixing). First targets: the 34 repeated-content losses and the straight-edge headroom | Next |
-| M4 | Mixer + SSE. Add C, E, F one at a time, keep each only if it lowers total cost | |
-| M5 | Encoder search (upscale, transpose, context order, period) + raw fallback | |
-| M6 | Fixed-point arithmetic coder + bitstream. Size ≤ ideal + 4 bytes. Round-trip tests | |
-| M7 | Speed (compiled port) | Later |
-
-**Target:** smaller than JPEG XL effort 10 on every corpus category, measured as the cost of the
-alpha *given* the colour (JXL RGBA − RGB).
-
-## 9. Risks and open questions
-
-1. **Corpus bias.** The real images come from installed applications (mostly UI icons and GIFs).
-   A public corpus with large cutouts, sprites, segmentation masks and GIF conversions is needed,
-   with licences checked.
-2. **Speed.** Every pixel goes through several models and a mixer, for both encoding and decoding.
-3. **Memory.** CTW at depth 24 on n pixels can create up to 24·n nodes, so it needs a bounded,
-   deterministic table.
-4. **Tiles vs one stream.** Every tile restart re-pays the learning cost.
-5. **Colour-first order** means the colour coder can't use alpha. That has to be confirmed once
-   the YCoCg coder exists.
-
-## Sources
-
-Linked inline above. Main references: [RFC 9649 (WebP)](https://www.rfc-editor.org/rfc/rfc9649.txt),
-[PNG 3rd edition](https://www.w3.org/TR/png-3/), [GIF89a](https://www.w3.org/Graphics/GIF/spec-gif89a.txt),
-[JPEG XL paper](https://arxiv.org/html/2506.05987), [libjxl](https://github.com/libjxl/libjxl),
-[FLIF spec](https://flif.info/spec.html), [CTS](https://ar5iv.arxiv.org/html/1111.3182),
-[PTW](https://ar5iv.arxiv.org/html/1211.0587), [GLN](https://arxiv.org/pdf/1712.01897),
-[sparse binary masks](https://arxiv.org/pdf/2010.13634), [chain coding 2026](https://arxiv.org/abs/2603.03073).

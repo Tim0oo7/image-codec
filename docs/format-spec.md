@@ -89,8 +89,9 @@ index order, then free.
 ## Alpha channel
 
 - Constant alpha: header flag + value, no payload.
-- Binary alpha: see [alpha-binary.md](alpha-binary.md).
-- Proposed: alpha is coded after the YCoCg channels, so its model can use the decoded colour
-  (including a colour-key mode with no alpha payload). See alpha-binary.md §6.
+- Binary alpha: the two values, then the pixels coded with the predictor in
+  [alpha-binary.md](alpha-binary.md) (CTW over neighbours + line and match bits, no other side
+  information).
+- Whether alpha is coded before or after the colour channels is still open.
 
 ## Metadata
