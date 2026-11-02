@@ -1,6 +1,6 @@
 # Binary alpha: the prediction model
 
-Status: research v3.2 (2026-10-30). Nothing here is final. Every number can be reproduced with the
+Status: research v3.3 (2026-11-02). Nothing here is final. Every number can be reproduced with the
 scripts in [research/alpha_binary](../research/alpha_binary/README.md). v2 of this document
 (format survey, colour-key ideas, first measurements) is in the git history.
 
@@ -30,6 +30,10 @@ arithmetic coder reaches that within a few bytes per image, so the coder itself 
   smaller than an idealised JBIG2 without headers**. Per mask, it is smaller than JPEG XL, PNG
   and AVIF on all 1,421, and smaller than WebP on 1,398 (WebP's wins are animation sprite strips).
 - **Compared with v2:** 15.8 % smaller as real files on the test set (same headers).
+- **Size classes, free of side information:** the decoder knows W × H before the first pixel,
+  so masks of at most 1,024 pixels use a plain CTW over the 24 nearest neighbours, and larger
+  masks the full model. With a bit-exact end of the arithmetic code, masks up to 32×32 are 6 %
+  smaller than CCITT Group 4 (fax), and the same total size at 16×16 or less (§3.4).
 - **What's stored:** the dimensions field, then an alpha-values code that is a single bit for
   the usual pair (0, 255), then the pixels. No mode flags, tables, offsets, colour keys or
   encoder choices. The decoder infers everything from pixels it already has.
@@ -153,7 +157,60 @@ model is actually better there. As a fixed context bit, the copy predictor won o
 but lost elsewhere and didn't generalise (§4.3). Mixed, it keeps the wins and loses at most
 0.6 % on any category. Cost: a second CTW pass.
 
-### 3.4 What is stored
+### 3.4 Size classes and the end of the stream
+
+The dimensions come first in the stream, so the decoder can choose the model by size with no
+extra bits:
+
+| Pixels (W · H) | Model |
+|---|---|
+| ≤ 1,024 (e.g. up to 32×32) | One CTW over the 24 nearest neighbours: no line, match or copy bits, no mixer |
+| > 1,024 | The full model: §3.1–3.3 |
+
+The arithmetic code ends **bit-exactly**: the payload follows the header bits with no padding,
+the encoder writes the shortest code that still decodes, and missing bits read as 0. Only the
+file as a whole is rounded up to bytes.
+
+Why these two rules (dev split to choose, test split to report):
+
+| Pixels | Masks (test) | Full model | Neighbours only | Change |
+|---|---|---|---|---|
+| 65–256 | 177 | 1,585 B | 1,544 B | −2.6 % |
+| 257–1,024 | 376 | 5,540 B | 5,331 B | −3.8 % |
+| 1,025–4,096 | 278 | 8,817 B | 8,839 B | +0.3 % |
+| 4,097–16,384 | 152 | 11,145 B | 10,817 B | −2.9 % (dev: +0.6 %) |
+| 16,385–65,536 | 157 | 20,673 B | 22,803 B | +10 % |
+| 65,537–262,144 | 184 | 32,541 B | 38,098 B | +17 % |
+| > 262,144 | 97 | 134,217 B | 157,842 B | +18 % |
+
+(Ideal payload of the v3 CTW layout with and without its feature bits.) On small masks the
+extra context bits cost more to learn than they save. The boundary at 1,024 pixels is where the
+dev split stops agreeing. The 4,097–16,384 bucket disagrees between dev and test, so it stays
+with the full model.
+
+| Pixels | Whole file, payload rounded to bytes | Bit-exact end | Saving |
+|---|---|---|---|
+| 65–256 | 2,107 B | 1,980 B | 6.0 % |
+| 257–1,024 | 6,668 B | 6,488 B | 2.7 % |
+| 1,025–4,096 | 9,686 B | 9,591 B | 1.0 % |
+| larger | | | ≤ 0.4 % |
+
+Against CCITT Group 4 on the same test masks (same header for both):
+
+| Pixels | Masks | v3.2 before | Size rule + bit-exact end | Group 4 |
+|---|---|---|---|---|
+| ≤ 256 | 177 | 2,036 B | **1,950 B** | 1,950 B (G4 smaller on 84, ours on 58, 35 ties) |
+| ≤ 1,024 | 553 | 8,552 B | **8,219 B** | 8,745 B (G4 smaller on 215, ours on 258, 80 ties) |
+
+Also measured and **not** adopted:
+
+- **Trained starting tables:** a P(opaque) per context prefix at every CTW depth, trained on dev.
+  Mid-size masks (1K–256K pixels) gain 2–4 %, but tiny ones gain nothing and the total gain is
+  1.3 %. It isn't worth about 8,000 numbers in the spec.
+- **More size classes:** nothing else changed with size. CTW already chooses its context
+  length per image.
+
+### 3.5 What is stored
 
 | Field | Size |
 |---|---|

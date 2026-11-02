@@ -17,6 +17,8 @@ research tools, not part of the codec.
 | `baselines.py` | JPEG XL, WebP, PNG, AVIF and an ideal JBIG2 generic template as harness cost functions |
 | `split.py` | Dev/test split by source object (glyph, pack, icon name, folder) |
 | `realcoder.py`, `realconfigs.py`, `test_realcoder.py` | Real coder: sequential CTW in a bounded table, 16-bit probabilities, arithmetic coding, round trip; real file sizes incl. headers |
+| `simple_codecs.py` | Raw bitmap, RLE (plain and adaptive), position lists, per-row change positions and CCITT Group 4, for comparison |
+| `size_classes.py`, `size_classes2.py` | Size-dependent choices: starting tables, context layouts and termination per size bucket |
 | `features_lz.py`, `features_sym.py`, `scan_order.py` | Rejected experiments: LZ-style copy, mirror/row repetition, scan orders |
 | `scan_alpha.py`, `threshold_scan.py`, `render_glyphs.py` | Build the corpus: find binary alpha, derive thresholded masks, render icon fonts |
 | `measure.py`, `analyze.py` | The v2 measurements (synthetic masks, colour-aware contexts) |
