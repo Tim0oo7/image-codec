@@ -19,6 +19,7 @@ research tools, not part of the codec.
 | `realcoder.py`, `realconfigs.py`, `test_realcoder.py` | Real coder: sequential CTW in a bounded table, 16-bit probabilities, arithmetic coding, round trip; real file sizes incl. headers |
 | `simple_codecs.py` | Raw bitmap, RLE (plain and adaptive), position lists, per-row change positions and CCITT Group 4, for comparison |
 | `size_classes.py`, `size_classes2.py` | Size-dependent choices: starting tables, context layouts and termination per size bucket |
+| `fixedcodec.py`, `test_fixedcodec.py` | The reference codec (`src/image_codec/alpha_binary.py`) compiled with numba: identical bytes, the same features as the research predictors, corpus runs and reports against `realconfigs.real_mix` |
 | `features_lz.py`, `features_sym.py`, `scan_order.py` | Rejected experiments: LZ-style copy, mirror/row repetition, scan orders |
 | `scan_alpha.py`, `threshold_scan.py`, `render_glyphs.py` | Build the corpus: find binary alpha, derive thresholded masks, render icon fonts |
 | `measure.py`, `analyze.py` | The v2 measurements (synthetic masks, colour-aware contexts) |
@@ -49,6 +50,9 @@ Run from this folder, so that `module:function` specs resolve:
 ```bash
 python harness.py run ../../corpus/manifest.json ../../corpus/out.json v2=none@24 new=cost:estimators:lm48_a4
 python simulate_decoder.py ../../corpus/manifest_quick.json
+python harness.py run ../../corpus/split_test.json ../../corpus/out_test_mix.json mix_real=cost:realconfigs:real_mix
+python fixedcodec.py ../../corpus/split_test.json ../../corpus/out_test_fixed.json final max20:TABLE_MAX=20
+python fixedcodec.py report ../../corpus/out_test_fixed.json ../../corpus/out_test_mix.json
 ```
 
 `HARNESS_WORKERS` (default 8) and `HARNESS_PER_CATEGORY` (default 400) are environment variables.

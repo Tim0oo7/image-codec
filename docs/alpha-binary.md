@@ -319,6 +319,49 @@ termination, 16-bit probabilities and table collisions, and it rises to 10–18 
 icons, where the fixed header matters most. A 2²² table instead of 2²⁴ costs up to 36 % on the
 most complex mask (text), so the node table needs care in the spec (§6).
 
+### 4.1d The fixed-point reference codec
+
+`src/image_codec/alpha_binary.py` is the codec as specified in
+[format-spec.md](format-spec.md#binary-alpha): every context bit computed incrementally from
+decoded pixels (a 25-row ring of transitions for the line predictor, one hashed table of
+(key, position) for the match and copy predictors), CTW with integer counts and log2 β in
+2⁻¹⁶ bit, a fixed-point mixer, and two formula-defined tables (LOG, 4,097 entries; SQUASH,
+8,193). It is plain Python (about 2,000–6,000 pixels per second); `fixedcodec.py` compiles the
+same functions with numba (about 300,000 pixels per second) and produces identical bytes. Its
+context bits equal the research features above on every mask checked (`test_fixedcodec.py`).
+
+Against `realconfigs.real_mix` (floating point, 2²⁴-node tables, the same 18-bit alpha header
+for both), test split, totals:
+
+| Step | Ratio to real_mix | Change |
+|---|---|---|
+| Fixed point, same tables (2²⁴ nodes, 2²² match slots), same learning rate, payload ends on a byte | 0.9985 | −0.15 % |
+| Tables sized by the image: 2^clamp(bitlen(N) + 5, 12, 24) nodes, 2^clamp(bitlen(N) + 3, 8, 22) match slots | 0.9995 | +0.10 % |
+| Drop trailing zero bits instead of ending on a byte | 0.9961 | −0.34 % |
+| Mixer learning rate 2⁻²³ instead of ≈ 0.02 (chosen on the dev split) | **0.9917** | −0.44 % |
+
+Masks of at most 1,024 pixels then use the size rule of §3.4 (one CTW over the 24 neighbours):
+in the fixed-point codec that saves a further 1.6 % on the 177 test masks of at most 256 pixels
+and 3.2 % on the 376 of 257–1,024 pixels. That is 0.1 % of the test total, which becomes
+**0.9905** (the table sizes below were measured without it).
+
+So fixed point loses nothing (the integer model is slightly better than the float one: counts
+are halved at 65,535 and β is clamped at 2^±24), and the final codec is 1 % smaller than
+real_mix. Per mask it is within a few bytes on tiny icons and at most 7.7 % larger on masks
+above 20,000 pixels; the 428 masks above that size total 0.992.
+
+Table size, the same codec with tbits capped lower:
+
+| Largest node table | Memory (2 models, 12 bytes per node) | Test split | Text 1024×512 | Floyd–Steinberg 512² |
+|---|---|---|---|---|
+| 2²⁴ (spec) | 384 MB | 0.9917 | 0.911 | 0.981 |
+| 2²² | 96 MB | 0.9920 | 0.924 | 0.988 |
+| 2²⁰ | 24 MB | 0.9925 | 0.962 | 1.010 |
+
+(The synthetic columns are ratios to real_mix on the masks of `measure.py`.) On real masks the
+cap hardly matters; the decision is about dense text and dither. A count limit of 1,023 instead
+of 65,535 costs 1.4 %, and a learning rate of 2⁻²² or 2⁻²⁴ costs 0.1 % on the dev split.
+
 ### 4.2 Synthetic shapes: how close to the theory
 
 Bits per boundary pixel (pairs of differing 4-neighbours), CTW over 24 neighbours:
@@ -384,8 +427,9 @@ feature values up to that point.
    symmetry, the curve rule and larger windows all helped some images and hurt others as
    context bits. The sprite strips are the last place where WebP still wins (23 masks).
 
-1. **Fixed-point, bounded CTW.** Integer counts, a fixed-size node table, and a specified hash for
-   the match table. Measure the loss against the ideal numbers here.
+1. ~~Fixed-point, bounded CTW.~~ Done (§4.1d, [format-spec.md](format-spec.md#binary-alpha)).
+   Still open: whether the largest node table should be 2²⁰ or 2²² instead of 2²⁴ (memory
+   against dense text), and storing single-visit subtrees compactly to need fewer nodes.
 2. **Better lines on curves.** Ellipses still cost 0.6 bits per boundary pixel, and the bound is
    much lower. Try a second-order rule (the run lengths of the run lengths) or a curvature step.
 3. **Corners and shape starts.** Track births and deaths (where a shape begins or ends in a row)
